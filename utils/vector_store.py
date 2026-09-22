@@ -1,14 +1,21 @@
 # utils/vector_store.py
 import os
+import re
+import time
+import datetime
 import pickle
 import faiss
 import numpy as np
 import logging
 from typing import List, Dict, Tuple, Optional
-from mistralai.client import MistralClient
-from mistralai.exceptions import MistralAPIException
-from langchain.text_splitter import RecursiveCharacterTextSplitter
+from mistralai.client import Mistral
+from mistralai.extra.exceptions import MistralClientException
+from langchain_text_splitters.character import RecursiveCharacterTextSplitter
 from langchain_core.documents import Document # Utilisé pour le format attendu par le splitter
+from rank_bm25 import BM25Okapi
+
+# Constante de la formule RRF (Reciprocal Rank Fusion) - 60 est la valeur standard de la littérature
+RRF_K = 60
 
 from .config import (
     MISTRAL_API_KEY, EMBEDDING_MODEL, EMBEDDING_BATCH_SIZE,
@@ -23,8 +30,22 @@ class VectorStoreManager:
     def __init__(self):
         self.index: Optional[faiss.Index] = None
         self.document_chunks: List[Dict[str, any]] = []
-        self.mistral_client = MistralClient(api_key=MISTRAL_API_KEY)
+        self.bm25: Optional[BM25Okapi] = None
+        self.mistral_client = Mistral(api_key=MISTRAL_API_KEY)
         self._load_index_and_chunks()
+
+    @staticmethod
+    def _tokenize(text: str) -> List[str]:
+        """Découpe un texte en mots pour BM25 (minuscules, sans ponctuation)."""
+        return re.findall(r"\w+", text.lower())
+
+    def _build_bm25_index(self):
+        """Construit l'index BM25 (recherche par mots-clés) à partir des chunks chargés."""
+        if not self.document_chunks:
+            self.bm25 = None
+            return
+        tokenized_corpus = [self._tokenize(chunk["text"]) for chunk in self.document_chunks]
+        self.bm25 = BM25Okapi(tokenized_corpus)
 
     def _load_index_and_chunks(self):
         """Charge l'index Faiss et les chunks si les fichiers existent."""
@@ -36,6 +57,7 @@ class VectorStoreManager:
                 with open(DOCUMENT_CHUNKS_FILE, 'rb') as f:
                     self.document_chunks = pickle.load(f)
                 logging.info(f"Index ({self.index.ntotal} vecteurs) et {len(self.document_chunks)} chunks chargés.")
+                self._build_bm25_index()
             except Exception as e:
                 logging.error(f"Erreur lors du chargement de l'index/chunks: {e}")
                 self.index = None
@@ -78,6 +100,15 @@ class VectorStoreManager:
         logging.info(f"Total de {len(all_chunks)} chunks créés.")
         return all_chunks
 
+    @staticmethod
+    def _get_status_code(exception: Exception) -> Optional[int]:
+        """Extrait le code HTTP d'une exception SDKError Mistral, si disponible."""
+        for arg in exception.args:
+            status = getattr(arg, "status_code", None)
+            if status is not None:
+                return status
+        return None
+
     def _generate_embeddings(self, chunks: List[Dict[str, any]]) -> Optional[np.ndarray]:
         """Génère les embeddings pour une liste de chunks via l'API Mistral."""
         if not MISTRAL_API_KEY:
@@ -90,6 +121,7 @@ class VectorStoreManager:
         logging.info(f"Génération des embeddings pour {len(chunks)} chunks (modèle: {EMBEDDING_MODEL})...")
         all_embeddings = []
         total_batches = (len(chunks) + EMBEDDING_BATCH_SIZE - 1) // EMBEDDING_BATCH_SIZE
+        max_retries = 5
 
         for i in range(0, len(chunks), EMBEDDING_BATCH_SIZE):
             batch_num = (i // EMBEDDING_BATCH_SIZE) + 1
@@ -97,39 +129,39 @@ class VectorStoreManager:
             texts_to_embed = [chunk["text"] for chunk in batch_chunks]
 
             logging.info(f"  Traitement du lot {batch_num}/{total_batches} ({len(texts_to_embed)} chunks)")
-            try:
-                response = self.mistral_client.embeddings(
-                    model=EMBEDDING_MODEL,
-                    input=texts_to_embed
-                )
-                batch_embeddings = [data.embedding for data in response.data]
-                all_embeddings.extend(batch_embeddings)
-            except MistralAPIException as e:
-                logging.error(f"Erreur API Mistral lors de la génération d'embeddings (lot {batch_num}): {e}")
-                logging.error(f"  Détails: Status Code={e.status_code}, Message={e.message}")
-            except Exception as e:
-                logging.error(f"Erreur inattendue lors de la génération d'embeddings (lot {batch_num}): {e}")
-                 # Gérer l'erreur: ici on ajoute des vecteurs nuls pour ne pas bloquer
-                num_failed = len(texts_to_embed)
-                if all_embeddings: # Si on a déjà des embeddings, on prend la dimension du premier
-                    dim = len(all_embeddings[0])
-                else: # Sinon, on ne peut pas déterminer la dimension, on saute ce lot
-                     logging.error("Impossible de déterminer la dimension des embeddings, saut du lot.")
-                     continue
-                logging.warning(f"Ajout de {num_failed} vecteurs nuls de dimension {dim} pour le lot échoué.")
-                all_embeddings.extend([np.zeros(dim, dtype='float32')] * num_failed)
 
-            except Exception as e:
-                logging.error(f"Erreur inattendue lors de la génération d'embeddings (lot {batch_num}): {e}")
-                # Gérer comme ci-dessus
-                num_failed = len(texts_to_embed)
+            batch_embeddings = None
+            for attempt in range(max_retries):
+                try:
+                    response = self.mistral_client.embeddings.create(
+                        model=EMBEDDING_MODEL,
+                        inputs=texts_to_embed
+                    )
+                    batch_embeddings = [data.embedding for data in response.data]
+                    break  # succès
+                except Exception as e:
+                    status_code = self._get_status_code(e)
+                    if status_code == 429 and attempt < max_retries - 1:
+                        wait_time = 2 ** (attempt + 1)  # 2s, 4s, 8s, 16s, 32s
+                        logging.warning(
+                            f"  Rate limit (429) sur le lot {batch_num}, nouvelle tentative dans "
+                            f"{wait_time}s (essai {attempt + 1}/{max_retries})..."
+                        )
+                        time.sleep(wait_time)
+                        continue
+                    logging.error(f"Erreur lors de la génération d'embeddings (lot {batch_num}, tentative {attempt + 1}): {e}")
+                    break  # échec définitif : pas un 429, ou plus de tentatives disponibles
+
+            if batch_embeddings is not None:
+                all_embeddings.extend(batch_embeddings)
+            else:
+                # Échec définitif du lot après épuisement des tentatives : vecteurs nuls pour ne pas bloquer
                 if all_embeddings:
                     dim = len(all_embeddings[0])
+                    logging.warning(f"Ajout de {len(texts_to_embed)} vecteurs nuls de dimension {dim} pour le lot {batch_num} (échec définitif).")
+                    all_embeddings.extend([np.zeros(dim, dtype='float32')] * len(texts_to_embed))
                 else:
-                     logging.error("Impossible de déterminer la dimension des embeddings, saut du lot.")
-                     continue
-                logging.warning(f"Ajout de {num_failed} vecteurs nuls de dimension {dim} pour le lot échoué.")
-                all_embeddings.extend([np.zeros(dim, dtype='float32')] * num_failed)
+                    logging.error(f"Impossible de déterminer la dimension des embeddings, lot {batch_num} perdu.")
 
 
         if not all_embeddings:
@@ -177,7 +209,47 @@ class VectorStoreManager:
         self.index.add(embeddings)
         logging.info(f"Index Faiss créé avec {self.index.ntotal} vecteurs.")
 
-        # 4. Sauvegarder l'index et les chunks
+        # 4. Construire l'index BM25 (recherche par mots-clés) en complément du Faiss
+        self._build_bm25_index()
+
+        # 5. Sauvegarder l'index et les chunks
+        self._save_index_and_chunks()
+
+    def add_chunks(self, new_chunks: List[Dict[str, any]]):
+        """
+        Ajoute des chunks à l'index EXISTANT, sans réembeder ce qui y est déjà.
+        Contrairement à build_index(), ne repart pas de zéro : n'appelle l'API
+        d'embeddings que sur `new_chunks`.
+
+        Args:
+            new_chunks: chunks déjà découpés (format identique à _split_documents_to_chunks),
+                        pas encore présents dans self.document_chunks.
+        """
+        if not new_chunks:
+            logging.warning("Aucun nouveau chunk à ajouter.")
+            return
+
+        # 1. Embeddings UNIQUEMENT pour les nouveaux chunks (coûteux en API, donc pas sur l'existant)
+        new_embeddings = self._generate_embeddings(new_chunks)
+        if new_embeddings is None or new_embeddings.shape[0] != len(new_chunks):
+            logging.error("Problème de génération d'embeddings pour les nouveaux chunks. Ajout annulé.")
+            return
+
+        faiss.normalize_L2(new_embeddings)
+
+        # 2. Ajout incrémental à l'index Faiss existant (IndexFlatIP supporte .add() répété)
+        if self.index is None:
+            dimension = new_embeddings.shape[1]
+            self.index = faiss.IndexFlatIP(dimension)
+        self.index.add(new_embeddings)
+        self.document_chunks.extend(new_chunks)
+        logging.info(f"{len(new_chunks)} chunks ajoutés. Index Faiss: {self.index.ntotal} vecteurs au total.")
+
+        # 3. BM25 doit être reconstruit en entier (pas d'ajout incrémental dans rank_bm25),
+        # mais c'est gratuit : pas d'appel API, juste retokeniser le texte.
+        self._build_bm25_index()
+
+        # 4. Sauvegarde
         self._save_index_and_chunks()
 
     def _save_index_and_chunks(self):
@@ -199,7 +271,37 @@ class VectorStoreManager:
         except Exception as e:
             logging.error(f"Erreur lors de la sauvegarde de l'index/chunks: {e}")
 
-    def search(self, query_text: str, k: int = 5, min_score: float = None) -> List[Dict[str, any]]:
+    @staticmethod
+    def _is_past(date_str: Optional[str], today: datetime.date, default_if_unparseable: bool = True) -> bool:
+        """
+        Détermine si une date d'événement (format ISO, ex: "2026-02-14T18:00:00+00:00") est
+        antérieure à `today`. Filtre déterministe (pas de raisonnement LLM sur les dates,
+        qui s'est montré peu fiable en pratique).
+
+        Args:
+            default_if_unparseable: valeur renvoyée si la date est absente/non-parsable.
+                True par défaut = on exclut par prudence (mieux vaut rater un résultat
+                qu'afficher une date qu'on n'a pas pu vérifier).
+        """
+        if not date_str or date_str == "N/A":
+            return default_if_unparseable
+        try:
+            event_date = datetime.datetime.fromisoformat(date_str).date()
+        except (ValueError, TypeError):
+            return default_if_unparseable
+        return event_date < today
+
+    def search(
+        self,
+        query_text: str,
+        k: int = 5,
+        min_score: float = None,
+        city: Optional[str] = None,
+        region: Optional[str] = None,
+        month: Optional[int] = None,
+        year: Optional[int] = None,
+        include_past: bool = True,
+    ) -> List[Dict[str, any]]:
         """
         Recherche les k chunks les plus pertinents pour une requête.
 
@@ -207,6 +309,16 @@ class VectorStoreManager:
             query_text: Texte de la requête
             k: Nombre de résultats à retourner
             min_score: Score minimum (entre 0 et 1) pour inclure un résultat
+            city: si fourni, ne garde que les chunks dont la métadonnée 'ville' correspond
+                  (comparaison insensible à la casse)
+            region: si fourni, ne garde que les chunks dont la métadonnée 'region' correspond
+                  (comparaison insensible à la casse). Note : seuls les chunks indexés/migrés
+                  après l'ajout de ce champ ont une région renseignée.
+            month: si fourni (1-12), ne garde que les chunks dont le mois de la date correspond
+            year: si fourni avec `month`, restreint aussi à cette année précise (sinon "octobre"
+                  attrape n'importe quelle année - vérifié en pratique, mauvaise surprise sans ça)
+            include_past: si False, exclut (filtre déterministe, pas de LLM) les chunks dont
+                  la date est antérieure à aujourd'hui, ou dont la date est absente/non-parsable.
 
         Returns:
             Liste des chunks pertinents avec leurs scores
@@ -218,59 +330,93 @@ class VectorStoreManager:
              logging.error("Recherche impossible: MISTRAL_API_KEY manquante pour générer l'embedding de la requête.")
              return []
 
-        logging.info(f"Recherche des {k} chunks les plus pertinents pour: '{query_text}'")
+        logging.info(f"Recherche hybride (dense+BM25) des {k} chunks les plus pertinents pour: '{query_text}'")
         try:
-            # 1. Générer l'embedding de la requête
-            response = self.mistral_client.embeddings(
+            n_total = self.index.ntotal
+
+            # 1. Recherche dense (Faiss) : classement de TOUS les chunks par similarité cosinus
+            response = self.mistral_client.embeddings.create(
                 model=EMBEDDING_MODEL,
-                input=[query_text] # La requête doit être une liste
+                inputs=[query_text] # La requête doit être une liste
             )
             query_embedding = np.array([response.data[0].embedding]).astype('float32')
+            faiss.normalize_L2(query_embedding) # Pour la similarité cosinus
 
-            # Normaliser l'embedding de la requête pour la similarité cosinus
-            faiss.normalize_L2(query_embedding)
+            dense_scores, dense_indices = self.index.search(query_embedding, n_total)
+            # rang (0 = meilleur) et score brut par index de chunk
+            dense_rank = {int(idx): rank for rank, idx in enumerate(dense_indices[0])}
+            dense_score_map = {int(idx): float(dense_scores[0][rank]) for rank, idx in enumerate(dense_indices[0])}
 
-            # 2. Rechercher dans l'index Faiss
-            # Pour IndexFlatIP: scores = produit scalaire (plus grand = meilleur)
-            # indices: index des chunks correspondants dans self.document_chunks
-            # Demander plus de résultats si un score minimum est spécifié
-            search_k = k * 3 if min_score is not None else k
-            scores, indices = self.index.search(query_embedding, search_k)
+            # 2. Recherche sparse (BM25) : classement de TOUS les chunks par correspondance de mots-clés
+            if self.bm25 is not None:
+                bm25_scores = self.bm25.get_scores(self._tokenize(query_text))
+                bm25_order = np.argsort(-bm25_scores) # du meilleur score au pire
+                bm25_rank = {int(idx): rank for rank, idx in enumerate(bm25_order)}
+            else:
+                bm25_rank = {}
 
-            # 3. Formater les résultats
+            # 3. Fusion des deux classements par Reciprocal Rank Fusion (RRF)
+            # Chaque retrieveur "vote" en fonction du RANG (pas du score brut, non comparable entre les deux méthodes)
+            fused_scores = {}
+            for idx in range(n_total):
+                r_dense = dense_rank.get(idx, n_total)
+                r_bm25 = bm25_rank.get(idx, n_total)
+                fused_scores[idx] = 1.0 / (RRF_K + r_dense + 1) + 1.0 / (RRF_K + r_bm25 + 1)
+
+            # Classement final : score fusionné décroissant
+            sorted_idx = sorted(fused_scores, key=lambda i: fused_scores[i], reverse=True)
+
+            # 4. Formater les résultats (le score affiché reste la similarité cosinus dense, pour rester lisible)
             results = []
-            if indices.size > 0: # Vérifier s'il y a des résultats
-                for i, idx in enumerate(indices[0]):
-                    if 0 <= idx < len(self.document_chunks): # Vérifier la validité de l'index
-                        chunk = self.document_chunks[idx]
-                        # Convertir le score en similarité (0-1)
-                        # Pour IndexFlatIP avec vecteurs normalisés, le score est déjà entre -1 et 1
-                        # On le convertit en pourcentage (0-100%)
-                        raw_score = float(scores[0][i])
-                        similarity = raw_score * 100
+            min_score_percent = min_score * 100 if min_score is not None else 0
+            for idx in sorted_idx:
+                if not (0 <= idx < len(self.document_chunks)):
+                    logging.warning(f"Index {idx} hors limites (taille des chunks: {len(self.document_chunks)}).")
+                    continue
 
-                        # Filtrer les résultats en fonction du score minimum
-                        # Le min_score est entre 0 et 1, mais similarity est en pourcentage (0-100)
-                        min_score_percent = min_score * 100 if min_score is not None else 0
-                        if min_score is not None and similarity < min_score_percent:
-                            logging.debug(f"Document filtré (score {similarity:.2f}% < minimum {min_score_percent:.2f}%)")
-                            continue
+                raw_score = dense_score_map.get(idx, 0.0)
+                similarity = raw_score * 100
 
-                        results.append({
-                            "score": similarity, # Score de similarité en pourcentage
-                            "raw_score": raw_score, # Score brut pour débogage
-                            "text": chunk["text"],
-                            "metadata": chunk["metadata"] # Contient source, category, chunk_id_in_doc, start_index etc.
-                        })
-                    else:
-                        logging.warning(f"Index Faiss {idx} hors limites (taille des chunks: {len(self.document_chunks)}).")
+                if min_score is not None and similarity < min_score_percent:
+                    logging.debug(f"Document filtré (score {similarity:.2f}% < minimum {min_score_percent:.2f}%)")
+                    continue
 
-            # Trier par score (similarité la plus élevée en premier)
-            results.sort(key=lambda x: x["score"], reverse=True)
+                chunk = self.document_chunks[idx]
 
-            # Limiter au nombre demandé (k) si nécessaire
-            if len(results) > k:
-                results = results[:k]
+                if city is not None:
+                    chunk_ville = (chunk["metadata"].get("ville") or "").strip().lower()
+                    if chunk_ville != city.strip().lower():
+                        continue
+
+                if region is not None:
+                    chunk_region = (chunk["metadata"].get("region") or "").strip().lower()
+                    if chunk_region != region.strip().lower():
+                        continue
+
+                if month is not None:
+                    chunk_date = chunk["metadata"].get("date")
+                    try:
+                        parsed_date = datetime.datetime.fromisoformat(chunk_date)
+                    except (ValueError, TypeError):
+                        continue  # date absente/non-parsable : on exclut par prudence, comme _is_past
+                    if parsed_date.month != month:
+                        continue
+                    if year is not None and parsed_date.year != year:
+                        continue
+
+                if not include_past and self._is_past(chunk["metadata"].get("date"), datetime.date.today()):
+                    continue
+
+                results.append({
+                    "score": similarity, # Score de similarité dense en pourcentage (affichage)
+                    "raw_score": raw_score, # Score brut dense pour débogage
+                    "rrf_score": fused_scores[idx], # Score de fusion utilisé pour le classement
+                    "text": chunk["text"],
+                    "metadata": chunk["metadata"] # Contient source, category, chunk_id_in_doc, start_index etc.
+                })
+
+                if len(results) >= k:
+                    break
 
             if min_score is not None:
                 min_score_percent = min_score * 100
@@ -280,7 +426,7 @@ class VectorStoreManager:
 
             return results
 
-        except MistralAPIException as e:
+        except MistralClientException as e:
             logging.error(f"Erreur API Mistral lors de la génération de l'embedding de la requête: {e}")
             logging.error(f"  Détails: Status Code={e.status_code}, Message={e.message}")
             return []

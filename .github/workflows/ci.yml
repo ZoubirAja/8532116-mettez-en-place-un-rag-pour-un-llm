@@ -1,0 +1,99 @@
+name: CI
+
+# Deux jobs volontairement séparés, avec des déclencheurs différents - voir chacun ci-dessous
+# pour la raison précise. Ce choix n'est pas arbitraire : il vient de contraintes réelles
+# rencontrées en développement (détaillées dans docs/rapport_technique.md), pas d'une
+# convention générique copiée d'un autre projet.
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch: {}   # permet de relancer le job d'évaluation à la demande, depuis l'onglet Actions
+  schedule:
+    - cron: "0 6 * * 1"   # tous les lundis 06h00 UTC - fréquence "automatisée" sans coût continu
+
+jobs:
+  # ---------------------------------------------------------------------------------------
+  # Job 1 : tests unitaires. Rapide, gratuit, aucun secret requis.
+  # Couvre : nettoyage/filtrage des données OpenAgenda (openagenda_loader), classification des
+  # requêtes, formatage des messages - tout ce qui peut être testé sans réseau (Mistral/Gemini
+  # mockés via monkeypatch, voir tests/test_puls_events.py). Tourne sur CHAQUE push et CHAQUE
+  # pull request : c'est le filet de sécurité systématique.
+  # ---------------------------------------------------------------------------------------
+  unit-tests:
+    name: Tests unitaires (sans appel réseau)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.14"
+          cache: "pip"
+
+      - name: Installer les dépendances
+        run: pip install -r requirements.txt
+
+      - name: Lancer les tests unitaires
+        run: pytest tests/test_puls_events.py -v
+
+  # ---------------------------------------------------------------------------------------
+  # Job 2 : tests d'intégration API + évaluation qualité. Lent, consomme les quotas gratuits
+  # Mistral/Gemini pour de vrai, nécessite des secrets. Volontairement PAS déclenché sur chaque
+  # push/PR :
+  #
+  # - vector_db/ (l'index Faiss + chunks) n'est plus versionné dans le repo (585 Mo pour le seul
+  #   index Faiss, dépasse la limite de 100 Mo par fichier de GitHub) - il doit être reconstruit,
+  #   et une reconstruction complète (scripts/index_by_region.py) prend ~40 minutes et consomme
+  #   des appels API Mistral réels à chaque fois. Mis en cache (voir step ci-dessous) pour éviter
+  #   de la refaire à chaque run.
+  # - Le quota gratuit Gemini (15 requêtes/minute) a été atteint à plusieurs reprises en
+  #   pratique pendant le développement, y compris pour une seule évaluation de 10 questions
+  #   (chaque question déclenche ~5-7 appels Gemini légers en plus de la génération finale) - le
+  #   lancer sur chaque push le rendrait systématiquement lent et parfois instable.
+  #
+  # Déclencheurs choisis : push sur main (pas sur chaque PR, pour ne pas consommer le quota à
+  # chaque itération de relecture), manuellement (workflow_dispatch), et une fois par semaine
+  # (schedule) pour satisfaire l'objectif d'évaluation automatisée sans dépendre d'un rythme de
+  # commits.
+  # ---------------------------------------------------------------------------------------
+  integration-and-evaluation:
+    name: Tests API + évaluation qualité (appels réels, secrets requis)
+    runs-on: ubuntu-latest
+    needs: unit-tests
+    if: github.event_name != 'pull_request'
+    env:
+      MISTRAL_API_KEY: ${{ secrets.MISTRAL_API_KEY }}
+      GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+      ADMIN_TOKEN: ${{ secrets.ADMIN_TOKEN }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.14"
+          cache: "pip"
+
+      - name: Installer les dépendances
+        run: pip install -r requirements.txt
+
+      # Évite de reconstruire l'index (~40 min, appels Mistral réels) à chaque run : mis en
+      # cache après la première construction. Changez le suffixe de la clé ("v1") pour forcer
+      # une reconstruction complète après une modification du pipeline d'indexation.
+      - name: Restaurer l'index vectoriel depuis le cache
+        id: cache-vector-db
+        uses: actions/cache@v4
+        with:
+          path: vector_db
+          key: vector-db-v1
+
+      - name: Construire l'index vectoriel (uniquement si absent du cache)
+        if: steps.cache-vector-db.outputs.cache-hit != 'true'
+        run: python -m scripts.index_by_region
+
+      - name: Tests fonctionnels de l'API (appels réels Mistral/Gemini)
+        run: pytest tests/api_test.py -v
+
+      - name: Évaluation automatique de la qualité des réponses
+        run: python -m scripts.evaluate_rag

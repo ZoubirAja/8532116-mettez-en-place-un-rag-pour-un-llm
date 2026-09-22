@@ -1,0 +1,11 @@
+venv/
+.venv/
+.git/
+__pycache__/
+*.pyc
+notebooks/
+correction_exercices/
+.pytest_cache/
+.env
+vector_db/
+database/

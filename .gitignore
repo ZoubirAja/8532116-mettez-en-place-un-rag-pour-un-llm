@@ -33,6 +33,10 @@ wheels/
 *.log
 logs/
 
+# Cache pytest - actuellement ignoré uniquement via son propre .pytest_cache/.gitignore
+# (généré automatiquement par pytest) ; explicité ici pour ne pas en dépendre.
+.pytest_cache/
+
 # Fichiers temporaires
 .DS_Store
 .idea/
@@ -44,5 +48,16 @@ logs/
 # Fichiers de données
 data/
 
+# Index vectoriel et base d'interactions : artefacts générés, pas du code source. Dépassent la
+# limite de 100 Mo par fichier de GitHub (faiss_index.idx atteint plusieurs centaines de Mo) -
+# à régénérer localement via `python -m scripts.index_by_region` (voir README.md).
+vector_db/
+database/*.db
+
+# Sauvegardes locales créées pendant le développement (jamais destinées à être versionnées)
+vector_db_backup_*/
+
 # Jupyter Notebook
 .ipynb_checkpoints
+
+coursework/

@@ -1,0 +1,10 @@
+services:
+  api:
+    build: .
+    ports:
+      - "8000:8000"
+    volumes:
+      - ./vector_db:/app/vector_db
+      - ./database:/app/database
+    env_file:
+      - .env

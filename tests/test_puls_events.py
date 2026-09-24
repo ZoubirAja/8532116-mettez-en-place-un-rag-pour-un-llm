@@ -26,14 +26,37 @@ def test_strip_html_removes_tags():
 def test_strip_html_decodes_entities():
     assert _strip_html("Caf&eacute; &amp; Th&eacute;") == "Café & Thé"
 
-def test_strip_html_collapses_whitespace():
-    assert _strip_html("Un   texte\navec\tdes espaces") == "Un texte avec des espaces"
+def test_strip_html_collapses_repeated_spaces_and_tabs():
+    # Espaces/tabulations multiples -> un seul, mais les sauts de ligne réels ne sont PLUS
+    # aplatis (voir test_strip_html_preserves_paragraph_breaks) - changement volontaire.
+    assert _strip_html("Un   texte avec\tdes espaces") == "Un texte avec des espaces"
 
 def test_strip_html_none_returns_empty_string():
     assert _strip_html(None) == ""
 
 def test_strip_html_empty_string_returns_empty_string():
     assert _strip_html("") == ""
+
+def test_strip_html_preserves_paragraph_breaks():
+    # OpenAgenda structure ses descriptions avec <p> (ex: intro puis programme minuté) - vérifié
+    # sur des exemples réels de l'API. Perdre ces coupures nuit à la lisibilité pour le LLM et
+    # aux points de coupure disponibles pour le chunking (bug réel corrigé, voir docstring).
+    html_input = "<p>Intro du texte.</p><p>Deuxième paragraphe.</p>"
+    assert _strip_html(html_input) == "Intro du texte.\n\nDeuxième paragraphe."
+
+def test_strip_html_converts_br_to_newline():
+    html_input = "<p>Ligne un.<br>Ligne deux.<br/>Ligne trois.</p>"
+    assert _strip_html(html_input) == "Ligne un.\nLigne deux.\nLigne trois."
+
+def test_strip_html_converts_li_to_bullet():
+    html_input = "<ul><li>Premier point</li><li>Deuxième point</li></ul>"
+    assert _strip_html(html_input) == "- Premier point\n- Deuxième point"
+
+def test_strip_html_collapses_excessive_blank_lines():
+    # Les <p></p> vides (fréquents chez OpenAgenda, utilisés pour l'espacement visuel) ne
+    # doivent pas produire plus de 2 sauts de ligne consécutifs.
+    html_input = "<p>Un</p><p></p><p></p><p>Deux</p>"
+    assert _strip_html(html_input) == "Un\n\nDeux"
 
 
 # --- openagenda_loader._months_ago ---

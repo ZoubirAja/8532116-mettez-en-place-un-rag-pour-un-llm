@@ -26,12 +26,28 @@ DEFAULT_EXCLUDED_AGENDAS = [
 
 
 def _strip_html(raw_html: Optional[str]) -> str:
-    """Retire les balises HTML (ex: longdescription_fr) et décode les entités (&eacute; etc.)."""
+    """
+    Retire les balises HTML (ex: longdescription_fr) et décode les entités (&eacute; etc.), en
+    préservant les coupures de blocs (paragraphes, retours à la ligne) comme de vrais sauts de
+    ligne plutôt que de tout aplatir en une seule ligne continue.
+
+    Pourquoi : OpenAgenda structure ses descriptions avec <p>/<br> (ex: un paragraphe d'intro,
+    puis un programme minuté avec un horaire par ligne) - vérifié sur des exemples réels. Aplatir
+    ça en une seule ligne (l'ancien comportement) nuit à la fois à la lisibilité du texte donné
+    au LLM et aux points de coupure disponibles pour le chunking (RecursiveCharacterTextSplitter
+    préfère couper sur \n\n/\n avant de couper au milieu d'une phrase).
+    """
     if not raw_html:
         return ""
-    text = re.sub(r"<[^>]+>", " ", raw_html)
+    text = re.sub(r"</p>\s*<p>", "\n\n", raw_html, flags=re.IGNORECASE)  # entre paragraphes
+    text = re.sub(r"<br\s*/?>", "\n", text, flags=re.IGNORECASE)  # retours à la ligne explicites
+    text = re.sub(r"<li[^>]*>", "\n- ", text, flags=re.IGNORECASE)  # éléments de liste
+    text = re.sub(r"<[^>]+>", "", text)  # balises restantes (ouvertures/fermetures simples)
     text = html.unescape(text)
-    return re.sub(r"\s+", " ", text).strip()
+    text = re.sub(r"[ \t]+", " ", text)  # espaces/tabulations multiples -> un seul (garde les \n)
+    text = re.sub(r" *\n *", "\n", text)  # espaces autour des sauts de ligne
+    text = re.sub(r"\n{3,}", "\n\n", text)  # jamais plus de 2 sauts de ligne consécutifs
+    return text.strip()
 
 
 def _months_ago(months: int) -> datetime.date:

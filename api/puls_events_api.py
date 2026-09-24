@@ -59,8 +59,12 @@ def health() -> Dict[str, str]:
     return {"status": "ok", "app": APP_NAME}
 
 
-def _handle_chat(request: ChatRequest) -> ChatResponse:
-    """Logique partagée entre /ask (nom demandé par le brief) et /chat (alias conservé)."""
+@app.post("/ask", response_model=ChatResponse)
+def ask(request: ChatRequest) -> ChatResponse:
+    """
+    Point d'entrée principal : pose une question au chatbot et reçoit une réponse
+    éventuellement enrichie d'événements culturels sources.
+    """
     try:
         result = answer_query(
             request.query,
@@ -73,21 +77,6 @@ def _handle_chat(request: ChatRequest) -> ChatResponse:
     except Exception as e:
         logging.error(f"Erreur lors du traitement de la requête: {e}", exc_info=True)
         raise HTTPException(status_code=500, detail=str(e))
-
-
-@app.post("/ask", response_model=ChatResponse)
-def ask(request: ChatRequest) -> ChatResponse:
-    """
-    Point d'entrée principal : pose une question au chatbot et reçoit une réponse
-    éventuellement enrichie d'événements culturels sources.
-    """
-    return _handle_chat(request)
-
-
-@app.post("/chat", response_model=ChatResponse)
-def chat(request: ChatRequest) -> ChatResponse:
-    """Alias de /ask, conservé pour compatibilité (nom utilisé pendant le développement)."""
-    return _handle_chat(request)
 
 
 def _verify_admin_token(x_admin_token: str = Header(None)):

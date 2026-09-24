@@ -46,11 +46,17 @@ Le système se décompose en trois étapes, détaillées ci-dessous : **indexati
 
 ### 2.2 Recherche : hybride, filtrée, à budget adaptatif
 
-**Recherche hybride (Faiss + BM25).** Une recherche purement dense (embeddings) dilue les entités
-nommées dans des documents plus longs — constaté en pratique lors du développement (un nom propre
-classé 25e-52e résultat sur 103 alors qu'il aurait dû être en tête). Le système combine donc une
-recherche dense (Faiss, similarité cosinus) et une recherche sparse (BM25, correspondance de
-mots-clés), fusionnées par Reciprocal Rank Fusion (RRF) :
+**Recherche hybride (Faiss + BM25).** Une recherche purement dense (embeddings) peut diluer un mot-clé
+ou un nom propre précis dans le sens global d'un document plus long, surtout si la requête ne
+partage aucun mot exact avec le texte indexé. C'est le risque théorique qui justifie de ne pas se
+reposer sur le dense seul : une recherche sparse (BM25, correspondance de mots-clés) reste
+insensible à ce problème puisqu'elle ne regarde que les mots effectivement présents. Sur le jeu de
+données OpenAgenda actuel, ce risque ne s'est pas matérialisé de façon flagrante en test manuel
+(`mistral-embed` retrouve bien les noms propres testés) - la robustesse vient plutôt de la garantie
+que les deux méthodes se complètent sans jamais se nuire : BM25 rattrape le dense sur les cas où
+il se tromperait, sans coût dans les cas où le dense se débrouille déjà bien. Le système combine
+donc une recherche dense (Faiss, similarité cosinus) et une recherche sparse (BM25, correspondance
+de mots-clés), fusionnées par Reciprocal Rank Fusion (RRF) :
 
 ```
 score(document) = 1/(60 + rang_dense + 1) + 1/(60 + rang_bm25 + 1)
@@ -128,7 +134,7 @@ lettre du brief à mentionner clairement en soutenance.
 
 FastAPI, avec documentation interactive automatique (`/docs`). Endpoints :
 
-- `POST /ask` (et son alias `/chat`) — pose une question, reçoit une réponse augmentée
+- `POST /ask` — pose une question, reçoit une réponse augmentée
 - `POST /rebuild` — relance l'indexation complète en tâche de fond, protégé par un header
   `X-Admin-Token` (recommandation du brief suivie : endpoint sensible protégé)
 - `GET /rebuild/status` — état du dernier rebuild déclenché
@@ -277,6 +283,24 @@ vérifiées manuellement, plutôt qu'en supposant que le code fonctionnait :
   de deviner un backoff exponentiel arbitraire — vérifié en conditions réelles : un enchaînement de
   20 appels qui échouait avant intégralement se termine maintenant avec succès, en attendant
   automatiquement le temps exact nécessaire (jusqu'à ~56 secondes observées).
+
+### 8.1 Réduction du code par tests destructifs
+
+Méthode : pour chaque candidat suspecté redondant, suppression réelle du code puis exécution de
+la suite de tests complète — si rien ne casse, c'est une preuve, pas une supposition. Trois
+suppressions confirmées de cette façon (~282 lignes de Python retirées, 21/21 tests toujours au
+vert après chaque suppression) :
+
+- **Endpoint `/chat`** (`api/puls_events_api.py`) : alias de `/ask` conservé "pour compatibilité"
+  mais sans aucun consommateur réel (ni la démo Streamlit, qui appelle `answer_query()` directement
+  en Python, ni aucun autre code) - seul son propre test l'utilisait.
+- **`get_db()`** (`utils/database.py`) : fonction de dépendance FastAPI classique (`yield` d'une
+  session SQLAlchemy) jamais câblée à une route via `Depends()` - `log_interaction()` gère sa
+  propre session directement. Zéro appel externe trouvé.
+- **`utils/data_loader.py` et le mode `--source files` de `scripts/indexer.py`** : hérités du tout
+  premier prototype (extraction PDF/DOCX/CSV pour le projet mairie, avant le pivot vers
+  OpenAgenda) - le dossier `inputs/` qu'ils traitaient n'existe même plus. Suppression en cascade
+  de 3 dépendances devenues orphelines (`PyPDF2`, `python-docx`, `openpyxl`) de `requirements.txt`.
 
 ## 9. Limites connues
 

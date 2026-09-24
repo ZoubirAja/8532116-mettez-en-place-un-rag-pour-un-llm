@@ -44,14 +44,6 @@ except SQLAlchemyError as e:
 # Crée une factory de session pour interagir avec la base de données
 SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
 
-def get_db():
-    """Fonction utilitaire pour obtenir une session de base de données."""
-    db = SessionLocal()
-    try:
-        yield db
-    finally:
-        db.close()
-
 def log_interaction(query: str, response: str, sources: list, metadata: dict = None, feedback: str = None, feedback_comment: str = None):
     """Enregistre une interaction dans la base de données.
 

@@ -84,10 +84,10 @@ python -c "import faiss; from langchain_text_splitters import RecursiveCharacter
 ```
 .
 ├── api/
-│   └── puls_events_api.py   # API REST (FastAPI) : /ask, /chat, /rebuild, /health
+│   └── puls_events_api.py   # API REST (FastAPI) : /ask, /rebuild, /health
 ├── scripts/                  # CLI exécutables (python -m scripts.<nom>)
 │   ├── index_by_region.py   # Indexation pondérée par région (script utilisé en production)
-│   ├── indexer.py           # Indexation depuis fichiers locaux OU OpenAgenda (une région/ville)
+│   ├── indexer.py           # Indexation OpenAgenda ciblée (une région/ville, pour tester)
 │   ├── migrate_add_region.py # Migration ponctuelle : backfill du champ région sur l'index existant
 │   └── evaluate_rag.py      # Évaluation automatique (similarité + juge LLM) sur un jeu annoté
 ├── tests/
@@ -103,8 +103,7 @@ python -c "import faiss; from langchain_text_splitters import RecursiveCharacter
 │   ├── chat_service.py       # Logique métier du chat, partagée entre Streamlit et l'API
 │   ├── gemini_client.py      # Client Gemini (génération finale)
 │   ├── formatting.py         # Formatage des dates en français
-│   ├── database.py           # Historique des interactions (SQLite)
-│   └── data_loader.py        # Extraction de texte PDF/DOCX/CSV (source "files" de indexer.py)
+│   └── database.py           # Historique des interactions (SQLite)
 ├── docs/
 │   └── rapport_technique.md # Rapport technique (architecture, choix, résultats, limites)
 ├── pages/
@@ -140,7 +139,7 @@ python -m scripts.index_by_region --mode extend   # ajoute seulement les nouveau
 **Option alternative** — une seule région/ville, plus rapide pour tester :
 
 ```bash
-python -m scripts.indexer --source openagenda --city "Bordeaux" --months-back 12 --max-records 500
+python -m scripts.indexer --city "Bordeaux" --months-back 12 --max-records 500
 ```
 
 **Migration ponctuelle** — remplit le champ région des chunks indexés avant son ajout (sans
@@ -167,8 +166,7 @@ uvicorn api.puls_events_api:app --reload
 → Doc interactive (Swagger) : http://localhost:8000/docs
 
 Endpoints principaux :
-- `POST /ask` (ou son alias `/chat`) — pose une question (`{"query": "..."}"`), reçoit une
-  réponse augmentée
+- `POST /ask` — pose une question (`{"query": "..."}"`), reçoit une réponse augmentée
 - `POST /rebuild` — relance l'indexation complète en arrière-plan (protégé par le header
   `X-Admin-Token`, doit correspondre à `ADMIN_TOKEN` dans `.env`)
 - `GET /rebuild/status` — consulte l'état du dernier rebuild déclenché
@@ -192,8 +190,8 @@ pytest tests/api_test.py             # tests fonctionnels de l'API : appels RÉE
 ```
 
 `tests/api_test.py` ne déclenche jamais un vrai `/rebuild` (uniquement le rejet 403 sans token
-valide), mais `/ask` et `/chat` appellent réellement le pipeline complet — comptez sur ces tests
-pour consommer un peu de quota API à chaque exécution.
+valide), mais `/ask` appelle réellement le pipeline complet — comptez sur ces tests pour
+consommer un peu de quota API à chaque exécution.
 
 ## Évaluer la qualité des réponses
 

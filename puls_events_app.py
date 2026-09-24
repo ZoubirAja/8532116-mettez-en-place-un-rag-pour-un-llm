@@ -37,16 +37,12 @@ with st.sidebar:
     # (ajoute systématiquement lieu + description, pas seulement small).
     selected_model = "mistral-medium-latest"
 
-    # Plafond de SÉCURITÉ, pas la vraie limite : le nombre réel d'événements envoyés au LLM
-    # dépend surtout du budget de contexte (voir MAX_CONTEXT_CHARS dans utils/config.py), qui
-    # s'adapte automatiquement (tous les résultats pertinents d'une recherche filtrée passent,
-    # une question large s'arrête avant d'exploser). Ce curseur ne fait que fixer un maximum.
-    num_docs = st.slider(
-        "Nombre maximum d'événements (plafond de sécurité)",
-        min_value=1, max_value=50, value=50, step=1,
-        help="Le budget de contexte (texte) décide en pratique du nombre réel d'événements envoyés "
-             "au LLM - ce curseur ne fait que fixer un maximum absolu.",
-    )
+    # Pas de curseur "nombre d'événements" ici : ce n'est pas un réglage de qualité (le classement
+    # Faiss+BM25+RRF porte toujours sur l'index entier, quel que soit ce plafond) - seul le budget
+    # de contexte (MAX_CONTEXT_CHARS, utils/config.py) décide réellement combien de résultats
+    # arrivent jusqu'au LLM, de façon adaptative. Un plafond bas ici ne ferait qu'appauvrir les
+    # questions multi-thèmes (risque de faire disparaître un thème entier) sans rien améliorer.
+    # SEARCH_K (utils/config.py) reste un garde-fou interne, pas exposé côté client.
 
     min_score_percent = st.slider(
         "Score minimum (filtrer les résultats faibles)", min_value=0, max_value=100, value=75, step=5, format="%d%%"
@@ -98,7 +94,6 @@ if prompt := st.chat_input("Posez votre question ici..."):
             result = answer_query(
                 prompt,
                 conversation_history=conversation_history,
-                num_docs=num_docs,
                 min_score=min_score,
                 model=selected_model,
             )

@@ -31,13 +31,6 @@ def test_ask_valid_question():
     assert data["mode"] in ("RAG", "DIRECT")
 
 
-def test_chat_alias_matches_ask():
-    """Vérifie que /chat (alias) répond de la même façon que /ask sur une question générale."""
-    response = client.post("/chat", json={"query": "Bonjour"})
-    assert response.status_code == 200
-    assert response.json()["mode"] == "DIRECT"
-
-
 def test_ask_empty_query_returns_422():
     response = client.post("/ask", json={"query": ""})
     assert response.status_code == 422

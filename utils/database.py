@@ -25,7 +25,12 @@ class Interaction(Base):
     __tablename__ = 'interactions'
 
     id = Column(Integer, primary_key=True)
-    timestamp = Column(DateTime, default=datetime.datetime.now(datetime.timezone.utc))
+    # `default=lambda: ...` (pas `default=datetime.datetime.now(...)`) : sans le lambda, la
+    # valeur n'était calculée qu'UNE fois au chargement du module, pas à chaque insertion - toutes
+    # les interactions d'un même processus (ex: une session Streamlit sans redémarrage) se
+    # retrouvaient avec le même horodatage figé (bug réel trouvé : plusieurs lignes de la table
+    # partageant l'horodatage à la microseconde près, présent depuis le tout premier commit).
+    timestamp = Column(DateTime, default=lambda: datetime.datetime.now(datetime.timezone.utc))
     query = Column(Text, nullable=False)
     response = Column(Text)
     sources = Column(JSON) # Stocke la liste des dictionnaires de sources en JSON

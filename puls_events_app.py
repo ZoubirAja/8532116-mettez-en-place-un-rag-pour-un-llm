@@ -45,7 +45,10 @@ with st.sidebar:
     # SEARCH_K (utils/config.py) reste un garde-fou interne, pas exposé côté client.
 
     min_score_percent = st.slider(
-        "Score minimum (filtrer les résultats faibles)", min_value=0, max_value=100, value=75, step=5, format="%d%%"
+        "Score minimum (filtrer les résultats faibles)", min_value=0, max_value=100, value=75, step=5, format="%d%%",
+        help="Score de similarité sémantique, pas un niveau de confiance classique : même un très "
+             "bon résultat dépasse rarement 80% avec notre modèle d'embeddings. Au-delà de 85%, "
+             "il est fréquent qu'aucun événement ne remonte, même pertinent.",
     )
     min_score = min_score_percent / 100.0
 

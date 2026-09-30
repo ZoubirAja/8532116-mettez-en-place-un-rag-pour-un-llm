@@ -178,7 +178,6 @@ def answer_query(
     conversation_history: Optional[List[Dict[str, str]]] = None,
     num_docs: int = SEARCH_K,
     min_score: Optional[float] = 0.75,
-    model: str = CHAT_MODEL,
 ) -> Dict[str, Any]:
     """
     Traite une question utilisateur de bout en bout : reformulation avec l'historique,
@@ -191,7 +190,6 @@ def answer_query(
                                du plus ancien au plus récent (sans inclure `query`). Optionnel.
         num_docs: nombre max de documents à récupérer si RAG est nécessaire
         min_score: score de similarité minimum (0-1) pour garder un résultat de recherche
-        model: modèle Mistral à utiliser pour la génération
 
     Returns:
         dict avec les clés: response, sources, mode, confidence, reason, interaction_id
@@ -302,7 +300,7 @@ def answer_query(
     # chat_response = None
     # for attempt in range(max_retries):
     #     try:
-    #         chat_response = _mistral_client.chat.complete(model=model, messages=messages)
+    #         chat_response = _mistral_client.chat.complete(model=CHAT_MODEL, messages=messages)
     #         break
     #     except Exception as e:
     #         status_code = VectorStoreManager._get_status_code(e)  # réutilise la détection déjà écrite pour l'indexation

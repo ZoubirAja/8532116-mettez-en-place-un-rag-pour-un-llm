@@ -33,7 +33,6 @@ class ChatRequest(BaseModel):
     )
     num_docs: int = Field(SEARCH_K, ge=1, le=20, description="Nombre max d'événements à récupérer")
     min_score: float = Field(0.75, ge=0.0, le=1.0, description="Score de similarité minimum (0-1)")
-    model: str = Field("mistral-medium-latest", description="Modèle Mistral à utiliser")
 
 
 class Source(BaseModel):
@@ -71,7 +70,6 @@ def ask(request: ChatRequest) -> ChatResponse:
             conversation_history=request.conversation_history,
             num_docs=request.num_docs,
             min_score=request.min_score,
-            model=request.model,
         )
         return ChatResponse(**result)
     except Exception as e:

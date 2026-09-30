@@ -21,14 +21,164 @@ des sources vérifiables (lien OpenAgenda de chaque événement).
 
 ## 2. Architecture générale
 
-```
-API OpenAgenda ──indexation──> Faiss + BM25 (vector_db/) ──recherche──> LLM ──> réponse
-                                                                          ↑
-                                                   Streamlit (démo) ou API REST (intégration)
+Le système se décompose en trois étapes, détaillées ci-dessous : **indexation** (hors ligne),
+**recherche** (à chaque question) et **génération** (à chaque question). Les trois diagrammes
+UML suivants (Mermaid, rendus directement par GitHub) décrivent l'architecture sous trois angles
+complémentaires.
+
+**Vue composants** — qui dépend de quoi, et quels services externes sont appelés :
+
+```mermaid
+flowchart LR
+    subgraph Clients
+        ST["Streamlit<br/>puls_events_app.py"]
+        API["API REST FastAPI<br/>api/puls_events_api.py"]
+    end
+
+    subgraph Coeur["Service métier (utils/)"]
+        CS["chat_service<br/>answer_query()"]
+        QC["QueryClassifier"]
+        VS["VectorStoreManager<br/>Faiss + BM25"]
+        IDX["indexing<br/>rebuild_index()"]
+        DB["database<br/>log_interaction()"]
+    end
+
+    subgraph Stockage
+        FILES[("vector_db/<br/>faiss_index.idx<br/>document_chunks.pkl")]
+        SQL[("SQLite<br/>interactions")]
+    end
+
+    subgraph Externes["Services externes"]
+        OA["API OpenAgenda"]
+        ME["Mistral<br/>mistral-embed"]
+        GE["Gemini<br/>gemini-flash-lite-latest"]
+    end
+
+    ST --> CS
+    API -->|"POST /ask"| CS
+    API -->|"POST /rebuild"| IDX
+    CS --> QC
+    CS --> VS
+    CS --> DB
+    CS -->|"génération"| GE
+    QC -->|"classification, extraction"| GE
+    VS -->|"embeddings"| ME
+    VS <--> FILES
+    IDX -->|"événements"| OA
+    IDX --> VS
+    DB --> SQL
 ```
 
-Le système se décompose en trois étapes, détaillées ci-dessous : **indexation** (hors ligne),
-**recherche** (à chaque question) et **génération** (à chaque question).
+**Diagramme de séquence** — traitement d'une question par `POST /ask` (l'interface Streamlit
+suit exactement le même chemin à partir de `answer_query`) :
+
+```mermaid
+sequenceDiagram
+    actor U as Utilisateur
+    participant A as API FastAPI
+    participant CS as chat_service
+    participant QC as QueryClassifier
+    participant VS as VectorStoreManager
+    participant M as Mistral embed
+    participant G as Gemini
+    participant DB as SQLite
+
+    U->>A: POST /ask {query, conversation_history}
+    A->>CS: answer_query(query, history, num_docs, min_score)
+    opt historique non vide
+        CS->>QC: reformulate_query()
+        QC->>G: question autonome
+    end
+    CS->>QC: needs_rag(search_query)
+    Note over QC: règles d'abord (salutations, mots-clés),<br/>LLM seulement si ambigu
+    alt besoin de RAG
+        CS->>QC: extract_city / extract_region / extract_month / extract_search_facets
+        QC->>G: extraction d'entités
+        loop pour chaque facette
+            CS->>VS: search(facette, filtres ville/région/mois, include_past)
+            VS->>M: embedding de la requête
+            Note over VS: Faiss (dense) + BM25 (mots-clés)<br/>fusion RRF puis filtres Python
+            VS-->>CS: chunks classés
+        end
+        Note over CS: dédoublonnage par URL,<br/>budget de contexte MAX_CONTEXT_CHARS
+    end
+    CS->>G: prompt système + contexte + historique
+    G-->>CS: réponse texte
+    CS->>DB: log_interaction()
+    CS-->>A: response, sources, mode, confidence, reason, interaction_id
+    A-->>U: 200 ChatResponse (JSON)
+```
+
+**Diagramme de classes** — classes principales et leurs responsabilités :
+
+```mermaid
+classDiagram
+    class VectorStoreManager {
+        -index : faiss.Index
+        -document_chunks : List~Dict~
+        -bm25 : BM25Okapi
+        +build_index(documents)
+        +add_chunks(new_chunks)
+        +search(query_text, k, min_score, city, region, month, year, include_past) List~Dict~
+        -_generate_embeddings(chunks) ndarray
+        -_split_documents_to_chunks(documents) List~Dict~
+        -_save_index_and_chunks()
+    }
+    class QueryClassifier {
+        +needs_rag(query) Tuple
+        +reformulate_query(query, history) str
+        +extract_city(query) str
+        +extract_region(query) str
+        +extract_month(query) Tuple
+        +extract_search_facets(query) List~str~
+        -_classify_with_llm(query) Tuple
+    }
+    class ChatMessage {
+        +role : str
+        +content : str
+        +format() dict
+    }
+    class Interaction {
+        <<SQLAlchemy>>
+        +id : int
+        +timestamp : DateTime
+        +query : str
+        +response : str
+        +sources : JSON
+        +query_metadata : JSON
+        +feedback : str
+        +feedback_value : int
+    }
+    class chat_service {
+        <<module>>
+        +answer_query(query, conversation_history, num_docs, min_score) Dict
+        +get_vector_store() VectorStoreManager
+    }
+    class ChatRequest {
+        <<Pydantic>>
+        +query : str
+        +conversation_history : List
+        +num_docs : int
+        +min_score : float
+    }
+    class ChatResponse {
+        <<Pydantic>>
+        +response : str
+        +sources : List~Source~
+        +mode : str
+        +confidence : float
+        +reason : str
+        +interaction_id : int
+    }
+
+    chat_service --> VectorStoreManager : instance partagée
+    chat_service --> QueryClassifier : instance partagée
+    chat_service ..> ChatMessage : construit le prompt
+    chat_service ..> Interaction : log_interaction()
+    QueryClassifier ..> ChatMessage
+    ChatRequest ..> chat_service : entrée de /ask
+    chat_service ..> ChatResponse : sortie de /ask
+```
 
 ### 2.1 Indexation
 
@@ -139,6 +289,19 @@ FastAPI, avec documentation interactive automatique (`/docs`). Endpoints :
   `X-Admin-Token` (recommandation du brief suivie : endpoint sensible protégé)
 - `GET /rebuild/status` — état du dernier rebuild déclenché
 - `GET /health` — vérification de disponibilité
+
+Exemple d'appel (réponse complète et variante Python `requests` dans le README, section
+« Exemples d'appel ») :
+
+```bash
+curl -X POST http://localhost:8000/ask \
+  -H "Content-Type: application/json" \
+  -d '{"query": "Quels concerts de jazz à Lyon ?", "num_docs": 3}'
+```
+
+La réponse JSON contient `response` (texte généré), `sources` (événements utilisés avec
+métadonnées et score), `mode` (`RAG`/`DIRECT`), `confidence`, `reason` (justification de la
+classification) et `interaction_id` (identifiant en base, pour le feedback).
 
 Testée via `tests/api_test.py` (TestClient, sans lancer de serveur réel) et manuellement via
 conteneur Docker (voir section 6).

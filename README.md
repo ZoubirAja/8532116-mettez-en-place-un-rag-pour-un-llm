@@ -166,11 +166,92 @@ uvicorn api.puls_events_api:app --reload
 → Doc interactive (Swagger) : http://localhost:8000/docs
 
 Endpoints principaux :
-- `POST /ask` — pose une question (`{"query": "..."}"`), reçoit une réponse augmentée
+- `POST /ask` — pose une question (`{"query": "..."}`), reçoit une réponse augmentée
 - `POST /rebuild` — relance l'indexation complète en arrière-plan (protégé par le header
   `X-Admin-Token`, doit correspondre à `ADMIN_TOKEN` dans `.env`)
 - `GET /rebuild/status` — consulte l'état du dernier rebuild déclenché
 - `GET /health` — vérification de disponibilité
+
+### Exemples d'appel
+
+**Vérifier que l'API est en ligne**
+
+```bash
+curl http://localhost:8000/health
+# {"status":"ok","app":"Puls-Events"}
+```
+
+**Poser une question** — seul `query` est obligatoire. `num_docs` (1-20) et `min_score` (0-1,
+défaut 0.75) sont optionnels. L'API est stateless : pour une conversation multi-tours, renvoyer
+les tours précédents dans `conversation_history`.
+
+```bash
+curl -X POST http://localhost:8000/ask \
+  -H "Content-Type: application/json" \
+  -d '{"query": "Quels concerts de jazz à Lyon ?", "num_docs": 3}'
+```
+
+Équivalent en Python :
+
+```python
+import requests
+
+resp = requests.post(
+    "http://localhost:8000/ask",
+    json={
+        "query": "Et le week-end prochain ?",
+        "conversation_history": [
+            {"role": "user", "content": "Quels concerts de jazz à Lyon ?"},
+            {"role": "assistant", "content": "Voici les concerts de jazz à Lyon..."},
+        ],
+    },
+    timeout=60,  # la génération LLM peut prendre plusieurs secondes
+)
+resp.raise_for_status()
+data = resp.json()
+print(data["mode"], data["response"])
+for src in data["sources"]:
+    print(f'- {src["metadata"]["filename"]} ({src["score"]:.1f}%)')
+```
+
+Réponse réelle obtenue pour la requête `curl` ci-dessus (tronquée) :
+
+```json
+{
+  "response": "Voici les événements et concerts de jazz à Lyon trouvés dans notre base :\n\n* **Jazz sur les Places Lyon Festival** ...",
+  "sources": [
+    {
+      "text": "Jazz sur les Places Lyon Festival\n\nConcerts de jazz festif en plein air ...",
+      "metadata": {
+        "filename": "Jazz sur les Places Lyon Festival",
+        "date": "2026-09-18T16:00:00+00:00",
+        "ville": "Lyon",
+        "region": "Auvergne-Rhône-Alpes",
+        "url": "https://openagenda.com/culture/events/jazz-sur-les-places-lyon-festival"
+      },
+      "score": 79.8
+    }
+  ],
+  "mode": "RAG",
+  "confidence": 0.9,
+  "reason": "Contient des mots-clés liés aux événements: concert, concerts",
+  "interaction_id": 169
+}
+```
+
+- `mode` : `RAG` (recherche d'événements effectuée) ou `DIRECT` (question hors événements,
+  réponse sans recherche)
+- `score` : similarité sémantique en % (dépasse rarement 80 %, voir le slider de l'app)
+- `interaction_id` : identifiant de l'échange enregistré en base (utilisé pour le feedback)
+
+**Relancer l'indexation (admin)**
+
+```bash
+curl -X POST http://localhost:8000/rebuild -H "X-Admin-Token: $ADMIN_TOKEN"
+curl http://localhost:8000/rebuild/status
+```
+
+Sans header valide, `/rebuild` répond `403`.
 
 ## Docker
 

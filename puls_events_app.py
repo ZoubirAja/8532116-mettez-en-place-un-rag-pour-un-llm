@@ -31,12 +31,6 @@ with st.sidebar:
     st.divider()
     st.subheader("⚙️ Paramètres")
 
-    # Modèle unique fixé en dur : mistral-large-latest renvoie une erreur 403 (non inclus
-    # dans l'abonnement Mistral utilisé), et entre les deux modèles restants testés,
-    # mistral-medium-latest donne des réponses plus complètes que mistral-small-latest
-    # (ajoute systématiquement lieu + description, pas seulement small).
-    selected_model = "mistral-medium-latest"
-
     # Pas de curseur "nombre d'événements" ici : ce n'est pas un réglage de qualité (le classement
     # Faiss+BM25+RRF porte toujours sur l'index entier, quel que soit ce plafond) - seul le budget
     # de contexte (MAX_CONTEXT_CHARS, utils/config.py) décide réellement combien de résultats
@@ -98,7 +92,6 @@ if prompt := st.chat_input("Posez votre question ici..."):
                 prompt,
                 conversation_history=conversation_history,
                 min_score=min_score,
-                model=selected_model,
             )
             placeholder.markdown(result["response"])
 
